@@ -246,10 +246,12 @@ def run_pipeline(clip_paths, room_names, script, voice, workdir, progress_cb):
     """clip_paths 和 room_names 一一对应，clip_paths 是已经切好的单房间无声视频文件路径
     （不管是手动按房间上传的，还是自动分段切出来的，走到这里都是一样的）"""
     segment_outputs = []
+    skipped_rooms = []
     n = len(clip_paths)
     for i, (video_path, room) in enumerate(zip(clip_paths, room_names)):
-        text = script["segments"].get(room, "")
+        text = (script["segments"].get(room, "") or "").strip()
         if not text:
+            skipped_rooms.append(room)
             continue
 
         base = os.path.join(workdir, f"seg{i}_{re.sub(r'[^0-9a-zA-Z_一-龥]', '_', room)}")
@@ -258,11 +260,26 @@ def run_pipeline(clip_paths, room_names, script, voice, workdir, progress_cb):
         seg_out_path = base + "_final.mp4"
 
         progress_cb(f"正在处理「{room}」...", 0.1 + 0.7 * (i / n))
-        tts_segment_sync(text, audio_path, voice)
+
+        try:
+            tts_segment_sync(text, audio_path, voice)
+        except Exception:
+            # edge-tts偶尔会因为网络问题临时失败，重试一次再放弃
+            try:
+                tts_segment_sync(text, audio_path, voice)
+            except Exception as e:
+                raise RuntimeError(f"「{room}」配音生成失败（文案：{text!r}）：{e}") from e
+
         duration = get_duration(audio_path)
         make_srt(text, duration, srt_path)
         merge_segment(video_path, audio_path, srt_path, seg_out_path)
         segment_outputs.append(seg_out_path)
+
+    if skipped_rooms:
+        st.warning(f"这几个房间没有讲解词，已跳过：{', '.join(skipped_rooms)}")
+
+    if not segment_outputs:
+        raise RuntimeError("所有房间都没有有效的讲解词，没有内容可以生成")
 
     progress_cb("正在拼接成片...", 0.85)
     final_path = os.path.join(workdir, "final.mp4")
