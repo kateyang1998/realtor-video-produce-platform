@@ -11,12 +11,14 @@
   output/post_caption.txt   AI生成的小红书文案（标题+正文+话题标签）
 
 安装依赖：
-  pip install anthropic edge-tts
+  pip install anthropic requests
   brew install ffmpeg      # Mac
   # 或 sudo apt install ffmpeg   # Linux/WSL
 
 需要设置环境变量：
   export ANTHROPIC_API_KEY=你的key
+  export AZURE_SPEECH_KEY=你的Azure语音服务key
+  export AZURE_SPEECH_REGION=你的Azure区域（例如 eastus）
 
 运行：
   python pipeline.py
@@ -26,20 +28,19 @@ import os
 import re
 import json
 import glob
-import asyncio
 import subprocess
+import xml.sax.saxutils as saxutils
 from pathlib import Path
 
+import requests
 import anthropic
-import edge_tts
 
 # ---------- 配置 ----------
 SEGMENTS_DIR = "segments"
 OUTPUT_DIR = "output"
 CONFIG_PATH = "config.json"
 
-# 免费的中文女声（微软Edge TTS，效果不错，不需要额外付费）
-# 想用她本人的声音克隆，把 tts_segment_sync 换成文件底部注释里的 ElevenLabs 版本
+# Azure官方语音合成的音色（跟edge-tts是同一批声音，但走官方稳定接口）
 VOICE = "zh-CN-XiaoxiaoNeural"
 
 client = anthropic.Anthropic()  # 自动读取 ANTHROPIC_API_KEY 环境变量
@@ -103,15 +104,31 @@ def generate_script(property_info: dict, room_names: list) -> dict:
     return json.loads(text)
 
 
-# ---------- 第二步：文字转语音 (TTS) ----------
+# ---------- 第二步：文字转语音 (Azure官方语音合成) ----------
 
-async def _tts_segment(text: str, out_path: str, voice: str = VOICE):
-    communicate = edge_tts.Communicate(text, voice)
-    await communicate.save(out_path)
+def tts_segment_sync(text: str, out_path: str, voice: str = VOICE):
+    key = os.environ.get("AZURE_SPEECH_KEY")
+    region = os.environ.get("AZURE_SPEECH_REGION")
+    if not key or not region:
+        raise RuntimeError("没有配置 AZURE_SPEECH_KEY / AZURE_SPEECH_REGION 环境变量")
 
-
-def tts_segment_sync(text: str, out_path: str):
-    asyncio.run(_tts_segment(text, out_path))
+    url = f"https://{region}.tts.speech.microsoft.com/cognitiveservices/v1"
+    headers = {
+        "Ocp-Apim-Subscription-Key": key,
+        "Content-Type": "application/ssml+xml",
+        "X-Microsoft-OutputFormat": "audio-24khz-48kbitrate-mono-mp3",
+        "User-Agent": "reeltour",
+    }
+    ssml = (
+        "<speak version='1.0' xml:lang='zh-CN'>"
+        f"<voice xml:lang='zh-CN' name='{voice}'>{saxutils.escape(text)}</voice>"
+        "</speak>"
+    )
+    resp = requests.post(url, headers=headers, data=ssml.encode("utf-8"), timeout=30)
+    if resp.status_code != 200:
+        raise RuntimeError(f"Azure TTS请求失败（状态码 {resp.status_code}）：{resp.text[:300]}")
+    with open(out_path, "wb") as f:
+        f.write(resp.content)
 
 
 # ---------- 第三步：ffmpeg 工具函数 ----------

@@ -17,8 +17,7 @@ listing.
 3. **The app**:
    - generates a short narration line per room + a social post caption,
      styled for short-form video (via the Claude API)
-   - converts the narration to speech (via free Microsoft Edge TTS by
-     default)
+   - converts the narration to speech (via Azure's text-to-speech service)
    - stretches/compresses each silent clip to match its narration length
    - burns in synced captions
    - concatenates everything into a single 9:16 vertical video
@@ -57,6 +56,8 @@ brew install ffmpeg        # macOS
 # sudo apt install ffmpeg  # Debian/Ubuntu
 
 export ANTHROPIC_API_KEY=your-key-here
+export AZURE_SPEECH_KEY=your-azure-speech-key
+export AZURE_SPEECH_REGION=your-azure-region
 
 streamlit run app.py
 ```
@@ -74,6 +75,8 @@ The easiest free option is [Streamlit Community Cloud](https://streamlit.io/clou
 3. In "Advanced settings" → Secrets, add:
    ```
    ANTHROPIC_API_KEY = "your-key-here"
+   AZURE_SPEECH_KEY = "your-azure-speech-key"
+   AZURE_SPEECH_REGION = "your-azure-region"
    ```
 4. Deploy. You'll get a `your-chosen-name.streamlit.app` URL you can share.
 
@@ -85,11 +88,27 @@ though the app itself uses a paid API key behind the scenes.
 ## Cost
 
 - Claude API: roughly a few cents per generated video (one short
-  generation call per listing).
-- Edge TTS: free.
+  generation call per listing, plus a slightly larger vision call if
+  using auto room-segmentation).
+- Azure Speech (text-to-speech): free for the first 500,000 characters
+  per month, then a small per-character charge — a typical listing
+  video uses well under 1,000 characters, so this stays free at low
+  volume.
 - Hosting on Streamlit Community Cloud: free.
 
 Total cost scales with usage, not a flat subscription.
+
+### Why Azure instead of a free unofficial TTS hack
+
+An earlier version of this project used `edge-tts`, an unofficial
+library that reverse-engineers Microsoft Edge's browser read-aloud
+feature. It's free but not a supported API — it breaks unpredictably
+whenever Microsoft changes something server-side, with no SLA and no
+fix timeline. Azure's official Speech service exposes the same neural
+voices through a documented, supported endpoint, at effectively the
+same cost for this scale of usage. The trade-off (a few minutes of
+Azure account setup) is worth it for something meant to be used
+regularly.
 
 ## Known limitations / things to improve
 

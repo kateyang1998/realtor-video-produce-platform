@@ -1,3 +1,3 @@
 streamlit
 anthropic
-edge-tts
+requests

@@ -16,14 +16,14 @@ import json
 import glob
 import base64
 import shutil
-import asyncio
 import tempfile
 import subprocess
+import xml.sax.saxutils as saxutils
 from pathlib import Path
 
+import requests
 import streamlit as st
 import anthropic
-import edge_tts
 
 VOICE_OPTIONS = {
     "晓晓 - 温暖女声（默认）": "zh-CN-XiaoxiaoNeural",
@@ -173,15 +173,36 @@ def cut_clip(video_path: str, start: float, end: float, out_path: str):
     ], check=True, capture_output=True)
 
 
-# ---------- TTS + ffmpeg 合成 ----------
+# ---------- TTS：改用Azure官方语音合成服务（跟edge-tts是同一批声音，但走官方稳定接口） ----------
 
-async def _tts_segment(text: str, out_path: str, voice: str):
-    communicate = edge_tts.Communicate(text, voice)
-    await communicate.save(out_path)
+def get_azure_config():
+    key = os.environ.get("AZURE_SPEECH_KEY")
+    region = os.environ.get("AZURE_SPEECH_REGION")
+    if not key or not region:
+        st.error("没有配置 AZURE_SPEECH_KEY / AZURE_SPEECH_REGION，请联系开发者设置")
+        st.stop()
+    return key, region
 
 
 def tts_segment_sync(text: str, out_path: str, voice: str):
-    asyncio.run(_tts_segment(text, out_path, voice))
+    key, region = get_azure_config()
+    url = f"https://{region}.tts.speech.microsoft.com/cognitiveservices/v1"
+    headers = {
+        "Ocp-Apim-Subscription-Key": key,
+        "Content-Type": "application/ssml+xml",
+        "X-Microsoft-OutputFormat": "audio-24khz-48kbitrate-mono-mp3",
+        "User-Agent": "reeltour",
+    }
+    ssml = (
+        "<speak version='1.0' xml:lang='zh-CN'>"
+        f"<voice xml:lang='zh-CN' name='{voice}'>{saxutils.escape(text)}</voice>"
+        "</speak>"
+    )
+    resp = requests.post(url, headers=headers, data=ssml.encode("utf-8"), timeout=30)
+    if resp.status_code != 200:
+        raise RuntimeError(f"Azure TTS请求失败（状态码 {resp.status_code}）：{resp.text[:300]}")
+    with open(out_path, "wb") as f:
+        f.write(resp.content)
 
 
 def get_duration(path: str) -> float:
@@ -393,7 +414,7 @@ else:
 st.subheader("④ 配音音色")
 voice_label = st.selectbox("选一个试试，音质有差异，多试几个", list(VOICE_OPTIONS.keys()))
 selected_voice = VOICE_OPTIONS[voice_label]
-st.caption("这几个都是免费的通用AI音色，会有一定机器感，想要完全自然的声音需要声音克隆（额外付费），可以后面再升级")
+st.caption("这几个是Azure官方语音合成的音色（每月有50万字符免费额度，超出后按量计费，很便宜），比免费hack方案稳定；想要完全自然、像真人的声音，需要声音克隆（额外付费），可以后面再升级")
 
 st.subheader("⑤ 生成")
 can_generate = bool(room_names)
