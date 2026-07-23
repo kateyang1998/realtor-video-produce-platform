@@ -1,100 +1,104 @@
-# 小红书房源视频自动化流程
+# Reeltour
 
-## 这套脚本做什么
+Turn a folder of silent real estate walkthrough clips into a ready-to-post
+short-form video — AI-generated narration, synced captions, and a
+platform-style caption (title + body + hashtags) — with a simple web UI.
 
-输入：她拍的无声walkthrough素材（按房间顺序命名） + 一份房源基本信息
-输出：
-- 一条带AI生成配音+同步字幕的成片（9:16竖屏，适配小红书）
-- 一段AI生成的小红书发布文案（标题+正文+话题标签）
+Built for solo real estate agents who shoot raw footage but don't have
+time (or a team) to script, voice, edit, and caption a video for every
+listing.
 
-流程：AI根据房源信息写讲解词 → 免费TTS配音 → 自动把无声视频片段调整到跟配音等长 → 烧录字幕 → 拼接成片。
+## How it works
 
-她只需要：拍素材、填一份几行字的房源信息、跑一个命令、review成片后自己发布。
+1. **You upload** silent video clips, one per room, named in shooting
+   order (e.g. `01-kitchen.mov`, `02-living-room.mov`).
+2. **You fill in** a few basic facts about the listing (address, layout,
+   size, price range, highlights).
+3. **The app**:
+   - generates a short narration line per room + a social post caption,
+     styled for short-form video (via the Claude API)
+   - converts the narration to speech (via free Microsoft Edge TTS by
+     default)
+   - stretches/compresses each silent clip to match its narration length
+   - burns in synced captions
+   - concatenates everything into a single 9:16 vertical video
+4. **You review** the result in the browser and download it. Publishing
+   is a manual, deliberate step — this tool does not auto-post anywhere.
 
-## 安装
+## Why a human stays in the loop
 
-```bash
-pip install anthropic edge-tts
-# Mac:
-brew install ffmpeg
-# Linux/WSL:
-sudo apt install ffmpeg
+This is intentionally *not* a fully hands-off, auto-publish pipeline.
+Two reasons:
+- Real estate advertising is subject to fair-housing / advertising
+  regulations in most jurisdictions — an unreviewed AI caption going
+  straight to a public account is a real risk.
+- Most social platforms (especially outside the US) don't offer a safe,
+  official API for individual creators to auto-publish. Unofficial
+  workarounds risk account suspension.
+
+So the app stops at "here's your finished video and caption, ready for
+you to post" — the actual publish click is yours.
+
+## Project structure
+
+```
+app.py                Streamlit web UI (what you actually run/deploy)
+pipeline.py            Same logic as a CLI script, useful for local testing
+config_example.json    Example listing-info input
+requirements.txt        Python dependencies
+packages.txt            System dependency (ffmpeg) for Streamlit Cloud
 ```
 
-设置API key（去 https://console.anthropic.com 申请）：
+## Local setup
 
 ```bash
-export ANTHROPIC_API_KEY=你的key
-```
+pip install -r requirements.txt
+brew install ffmpeg        # macOS
+# sudo apt install ffmpeg  # Debian/Ubuntu
 
-## 使用步骤
+export ANTHROPIC_API_KEY=your-key-here
 
-1. 新建一个项目文件夹，把 `pipeline.py` 放进去
-
-2. 新建 `segments/` 文件夹，把无声素材按房间顺序命名放进去：
-   ```
-   segments/01-厨房.mov
-   segments/02-客厅.mov
-   segments/03-主卧.mov
-   segments/04-浴室.mov
-   ```
-   （文件名里的房间名会被AI用来对应生成讲解词，中文英文都行，保持一致就好）
-
-3. 复制 `config_example.json` 为 `config.json`，填入这套房源的真实信息
-
-4. 跑脚本：
-   ```bash
-   python pipeline.py
-   ```
-
-5. 完成后去 `output/` 文件夹：
-   - `final.mp4` —— 成片，review一下
-   - `post_caption.txt` —— 小红书文案，可以直接复制粘贴发布时用
-
-## 这是个原型，几个可以改进的方向
-
-- **声音克隆**：现在用的是免费的通用中文女声（edge-tts），如果想让配音听起来像她本人，需要换成ElevenLabs之类支持声音克隆的TTS服务（脚本底部有注释代码），每月大概$5-22（看用量），需要先用她一段录音做克隆
-- **字幕更精细**：现在是整句字幕一次性显示，想要那种"逐字蹦出来"的效果，需要解析TTS返回的逐字时间戳（edge-tts的SubMaker功能可以做到），这个可以后面再加
-- **视频配对更聪明**：现在是靠文件名对应房间，如果想让AI自动识别画面里是哪个房间（不用手动命名），可以加一步用视觉模型分析首帧画面，但这个不是必须的，手动命名最简单可靠
-- **批量处理**：以后如果她一次要发好几套房源，可以把 `config.json` 换成一个列表，脚本循环跑
-
-## 网页版（给她本人用的界面）
-
-`pipeline.py` 是命令行脚本，只适合你自己测试。真正给她用的是 `app.py`——一个网页界面，
-她打开一个网址，就能看到：上传视频、填房源信息的表格、一个"生成"按钮，生成完直接在网页上
-看成片、下载视频、复制文案，全程不需要碰代码或命令行。
-
-### 本地先测试一下界面效果
-
-```bash
-pip install streamlit anthropic edge-tts
-export ANTHROPIC_API_KEY=你的key
 streamlit run app.py
 ```
 
-会自动在浏览器打开一个本地网址，可以先自己试用一遍，确认体验流畅再考虑部署。
+This opens a local URL in your browser where you can test the full flow
+before deploying it anywhere.
 
-### 部署给她用（关键一步）
+## Deploying so anyone can use it from a browser
 
-要让她"打开一个网址就能用"，而不是在自己电脑上装环境，需要把这个网页部署到服务器上。
-几个适合小项目、不用太懂运维的选择：
+The easiest free option is [Streamlit Community Cloud](https://streamlit.io/cloud):
 
-- **Streamlit Community Cloud**（streamlit.io/cloud）——免费，专门给Streamlit项目用的，
-  把代码传到GitHub，几分钟就能部署出一个公开网址，最简单，推荐先用这个
-- **Railway / Render**——如果以后想要更稳定、更私密（不想用免费公开平台），这两个平台
-  按用量付费，部署一个小工具一个月大概几美元
+1. Push this repo to GitHub (public or private both work — see note below).
+2. On Streamlit Community Cloud, create a new app, point it at this repo,
+   and set the main file to `app.py`.
+3. In "Advanced settings" → Secrets, add:
+   ```
+   ANTHROPIC_API_KEY = "your-key-here"
+   ```
+4. Deploy. You'll get a `your-chosen-name.streamlit.app` URL you can share.
 
-部署时要把 `ANTHROPIC_API_KEY` 设置成服务器上的环境变量（不要写死在代码里，也不要让
-她自己填），另外服务器上要确保装了 `ffmpeg`——上面两个平台都可以在部署配置里指定安装。
+**Note on the API key and public repos:** the key is never committed to
+this repository — it's injected at deploy time through Streamlit's
+Secrets manager. That means it's safe to keep this repo public even
+though the app itself uses a paid API key behind the scenes.
 
-部署好之后，她只需要收藏那个网址，以后每次要发新房源，打开网址、传素材、填几行房源信息、
-点生成，等一两分钟看成片，满意就自己去小红书发布。
+## Cost
 
-## 关于成本
+- Claude API: roughly a few cents per generated video (one short
+  generation call per listing).
+- Edge TTS: free.
+- Hosting on Streamlit Community Cloud: free.
 
-每次生成大概会用到：
-- 1次 Claude API 调用（生成文案，几分钱）
-- 几次 TTS 调用（免费，用edge-tts）
-- 本地ffmpeg渲染（免费，只占电脑算力）
+Total cost scales with usage, not a flat subscription.
 
-比起任何按月付费的AI剪辑SaaS工具，这个跑起来几乎不要钱，缺点是需要她（或者你）维护这个脚本、处理报错。
+## Known limitations / things to improve
+
+- Captions currently display as one block of text per room rather than
+  word-by-word — word-level timing would need parsing TTS timestamp
+  output.
+- Room-to-clip matching relies on filename convention, not visual
+  scene detection.
+- The default voice is a generic TTS voice, not a cloned voice — voice
+  cloning (e.g. via ElevenLabs) is possible but requires a paid API and
+  a voice sample.
+- Currently processes one listing at a time.
