@@ -327,6 +327,23 @@ upload_mode = st.radio(
     ["已经按房间分开拍摄（每段一个文件）", "一镜到底拍完整套房子，AI自动分段（测试中）"],
 )
 
+def dedupe_names(names: list) -> list:
+    """房间名可能重复（比如AI分段识别出两段都叫"走廊"，或者手动模式两个文件都手打了同样的名字）。
+    重复的话给后面的自动加个编号，避免：1) Streamlit组件key冲突报错 2) 用房间名当字典key时后面的
+    悄悄覆盖前面的数据"""
+    seen = {}
+    result = []
+    for n in names:
+        n = n or "未命名"
+        if n not in seen:
+            seen[n] = 1
+            result.append(n)
+        else:
+            seen[n] += 1
+            result.append(f"{n}({seen[n]})")
+    return result
+
+
 room_names = []
 manual_clip_paths = {}  # 手动模式：{房间名: 上传的文件对象}
 
@@ -336,10 +353,13 @@ if upload_mode.startswith("已经"):
     )
     if uploaded_files:
         st.write("给每段素材标一下房间/区域名称：")
+        raw_names = []
         for i, f in enumerate(uploaded_files):
             default_guess = re.sub(r"^\d+[-_]", "", Path(f.name).stem)
             room = st.text_input(f"素材 {i+1}（{f.name}）", value=default_guess, key=f"room_{i}")
-            room_names.append(room)
+            raw_names.append(room)
+        room_names = dedupe_names(raw_names)
+        for room, f in zip(room_names, uploaded_files):
             manual_clip_paths[room] = f
 else:
     uploaded_files = None
@@ -378,7 +398,9 @@ else:
                 key="segments_editor",
             )
             st.session_state.auto_segments = edited
-            room_names = [seg["room"] for seg in edited if seg.get("room")]
+            # 不在这里过滤掉空房间名的行，否则room_names的长度会跟后面切片段用的
+            # auto_segments对不上，统一交给dedupe_names处理空值
+            room_names = dedupe_names([seg.get("room", "") for seg in edited])
 
 mode = st.radio(
     "② 讲解文案怎么来",
