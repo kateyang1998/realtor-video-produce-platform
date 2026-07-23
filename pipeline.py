@@ -168,7 +168,7 @@ def merge_segment(video_path: str, audio_path: str, srt_path: str, out_path: str
         f"setpts={1/speed}*PTS,"
         "scale=1080:1920:force_original_aspect_ratio=increase:flags=lanczos,"
         "crop=1080:1920,"
-        f"subtitles={srt_path}:original_size=1080x1920:force_style='FontName=WenQuanYi Zen Hei,FontSize=20,"
+        f"subtitles={srt_path}:original_size=1080x1920:force_style='FontName=WenQuanYi Zen Hei,FontSize=15,"
         f"PrimaryColour=&HFFFFFF&,OutlineColour=&H000000&,BorderStyle=1,Outline=2,"
         f"Alignment=2,MarginV=80'"
     )

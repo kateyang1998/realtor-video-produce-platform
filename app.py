@@ -32,6 +32,11 @@ VOICE_OPTIONS = {
     "晓墨 - 成熟女声": "zh-CN-XiaomoNeural",
 }
 
+FONT_OPTIONS = {
+    "文泉驿正黑（默认，稍粗）": "WenQuanYi Zen Hei",
+    "文泉驿微米黑（偏细，更现代）": "WenQuanYi Micro Hei",
+}
+
 FRAME_INTERVAL = 4.0  # 自动分段时，每隔几秒抽一帧画面给AI判断房间类型
 
 st.set_page_config(page_title="Reeltour", page_icon="🎬", layout="centered")
@@ -214,7 +219,8 @@ def get_duration(path: str) -> float:
     return float(out.stdout.strip())
 
 
-def merge_segment(video_path: str, audio_path: str, srt_path: str, out_path: str):
+def merge_segment(video_path: str, audio_path: str, srt_path: str, out_path: str,
+                   font_name: str = "WenQuanYi Zen Hei", font_size: int = 15):
     """一次编码完成：调速对齐配音时长 + 缩放裁剪9:16 + 烧录中文字幕"""
     orig = get_duration(video_path)
     target = get_duration(audio_path)
@@ -224,7 +230,7 @@ def merge_segment(video_path: str, audio_path: str, srt_path: str, out_path: str
         f"setpts={1/speed}*PTS,"
         "scale=1080:1920:force_original_aspect_ratio=increase:flags=lanczos,"
         "crop=1080:1920,"
-        f"subtitles={srt_path}:original_size=1080x1920:force_style='FontName=WenQuanYi Zen Hei,FontSize=20,"
+        f"subtitles={srt_path}:original_size=1080x1920:force_style='FontName={font_name},FontSize={font_size},"
         f"PrimaryColour=&HFFFFFF&,OutlineColour=&H000000&,BorderStyle=1,Outline=2,"
         f"Alignment=2,MarginV=80'"
     )
@@ -270,7 +276,7 @@ def concat_segments(segment_paths: list, out_path: str, workdir: str):
     ], check=True, capture_output=True)
 
 
-def run_pipeline(clip_paths, room_names, script, voice, workdir, progress_cb):
+def run_pipeline(clip_paths, room_names, script, voice, font_name, font_size, workdir, progress_cb):
     """clip_paths 和 room_names 一一对应，clip_paths 是已经切好的单房间无声视频文件路径
     （不管是手动按房间上传的，还是自动分段切出来的，走到这里都是一样的）"""
     segment_outputs = []
@@ -300,7 +306,7 @@ def run_pipeline(clip_paths, room_names, script, voice, workdir, progress_cb):
 
         duration = get_duration(audio_path)
         make_srt(text, duration, srt_path)
-        merge_segment(video_path, audio_path, srt_path, seg_out_path)
+        merge_segment(video_path, audio_path, srt_path, seg_out_path, font_name, font_size)
         segment_outputs.append(seg_out_path)
 
     if skipped_rooms:
@@ -440,10 +446,15 @@ else:
     manual_body = st.text_area("正文")
     manual_hashtags = st.text_input("话题标签（空格分隔，例如：#卡尔加里买房 #首次购房）")
 
-st.subheader("④ 配音音色")
-voice_label = st.selectbox("选一个试试，音质有差异，多试几个", list(VOICE_OPTIONS.keys()))
+st.subheader("④ 配音音色 + 字幕样式")
+voice_label = st.selectbox("配音音色，选一个试试，音质有差异，多试几个", list(VOICE_OPTIONS.keys()))
 selected_voice = VOICE_OPTIONS[voice_label]
 st.caption("这几个是Azure官方语音合成的音色（每月有50万字符免费额度，超出后按量计费，很便宜），比免费hack方案稳定；想要完全自然、像真人的声音，需要声音克隆（额外付费），可以后面再升级")
+
+font_label = st.selectbox("字幕字体", list(FONT_OPTIONS.keys()))
+selected_font = FONT_OPTIONS[font_label]
+font_size = st.slider("字幕字号", min_value=12, max_value=28, value=15,
+                       help="字号越大，长句子换行越多，字幕整体会往画面上方扩展，建议先从默认值试")
 
 st.subheader("⑤ 生成")
 can_generate = bool(room_names)
@@ -485,7 +496,7 @@ if st.button("🚀 生成视频和文案", type="primary", disabled=not can_gene
             }
 
         final_path, caption_text = run_pipeline(
-            clip_paths, room_names, script, selected_voice, workdir, progress_cb
+            clip_paths, room_names, script, selected_voice, selected_font, font_size, workdir, progress_cb
         )
 
         st.success("生成完成！Review一下，满意的话就去小红书发布")
