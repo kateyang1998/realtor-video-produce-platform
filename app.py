@@ -53,7 +53,10 @@ def extract_text(resp) -> str:
     for block in resp.content:
         if getattr(block, "type", None) == "text":
             return block.text
-    raise ValueError("API响应里没有找到文字内容")
+    raise ValueError(
+        f"API响应里没有找到文字内容（stop_reason={resp.stop_reason}，"
+        f"可能是max_tokens不够、内容在思考过程里被截断了，试试调大max_tokens）"
+    )
 
 
 def generate_script(property_info: dict, room_names: list) -> dict:
@@ -88,7 +91,7 @@ def generate_script(property_info: dict, room_names: list) -> dict:
 """
     resp = client.messages.create(
         model="claude-sonnet-5",
-        max_tokens=1500,
+        max_tokens=4000,
         messages=[{"role": "user", "content": prompt}],
     )
     text = extract_text(resp).strip()
@@ -141,7 +144,7 @@ def detect_room_segments(video_path: str, workdir: str) -> list:
         })
 
     resp = client.messages.create(
-        model="claude-sonnet-5", max_tokens=3000,
+        model="claude-sonnet-5", max_tokens=6000,
         messages=[{"role": "user", "content": content}],
     )
     text = extract_text(resp).strip()
