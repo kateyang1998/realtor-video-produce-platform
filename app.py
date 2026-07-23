@@ -145,16 +145,15 @@ def concat_segments(segment_paths: list, out_path: str, workdir: str):
     ], check=True, capture_output=True)
 
 
-def run_pipeline(uploaded_files, room_names, property_info, workdir, progress_cb):
+def run_pipeline(uploaded_files, room_names, script, workdir, progress_cb):
+    """script 是一个已经准备好的 dict：{"segments": {房间: 文案}, "post_title": ..., "post_body": ..., "hashtags": [...]}
+    可以来自 generate_script()（AI生成），也可以是手动填写拼出来的——这个函数不关心来源"""
     video_files = []
     for f, room in zip(uploaded_files, room_names):
         path = os.path.join(workdir, f"{room}{Path(f.name).suffix}")
         with open(path, "wb") as out:
             out.write(f.getbuffer())
         video_files.append(path)
-
-    progress_cb("AI 正在生成讲解文案...", 0.1)
-    script = generate_script(property_info, room_names)
 
     segment_outputs = []
     n = len(video_files)
@@ -211,25 +210,39 @@ if uploaded_files:
         room = st.text_input(f"素材 {i+1}（{f.name}）", value=default_guess, key=f"room_{i}")
         room_names.append(room)
 
-st.subheader("② 房源信息")
-address = st.text_input("地址/小区名")
-layout = st.text_input("户型（例如：3室2卫）")
-size = st.text_input("面积")
-price = st.text_input("价格区间")
-highlights = st.text_area("亮点（每行一个，例如：厨房岛台大 / 采光好 / 近学校）")
-audience = st.text_input("目标客群（可选，例如：首次购房年轻家庭）")
+mode = st.radio(
+    "② 讲解文案怎么来",
+    ["手动输入（免费，测试用）", "AI自动生成（需要 API key，正式使用推荐）"],
+    help="测试阶段建议先用手动输入，不需要配置任何API key，先验证配音+剪辑效果",
+)
+use_ai = mode.startswith("AI")
+
+property_info = {}
+manual_segments = {}
+
+if use_ai:
+    st.subheader("② 房源信息")
+    property_info = {
+        "地址": st.text_input("地址/小区名"),
+        "户型": st.text_input("户型（例如：3室2卫）"),
+        "面积": st.text_input("面积"),
+        "价格区间": st.text_input("价格区间"),
+        "亮点": [h.strip() for h in st.text_area(
+            "亮点（每行一个，例如：厨房岛台大 / 采光好 / 近学校）").split("\n") if h.strip()],
+        "目标客群": st.text_input("目标客群（可选）"),
+    }
+else:
+    st.subheader("② 每个房间自己写一句讲解词")
+    if room_names:
+        for room in room_names:
+            manual_segments[room] = st.text_area(f"「{room}」的讲解词", key=f"seg_{room}")
+    st.subheader("小红书文案（可选，留空也行）")
+    manual_title = st.text_input("标题")
+    manual_body = st.text_area("正文")
+    manual_hashtags = st.text_input("话题标签（空格分隔，例如：#卡尔加里买房 #首次购房）")
 
 st.subheader("③ 生成")
 if st.button("🚀 生成视频和文案", type="primary", disabled=not uploaded_files):
-    property_info = {
-        "地址": address,
-        "户型": layout,
-        "面积": size,
-        "价格区间": price,
-        "亮点": [h.strip() for h in highlights.split("\n") if h.strip()],
-        "目标客群": audience,
-    }
-
     workdir = tempfile.mkdtemp()
     progress_bar = st.progress(0.0)
     status = st.empty()
@@ -239,8 +252,19 @@ if st.button("🚀 生成视频和文案", type="primary", disabled=not uploaded
         progress_bar.progress(pct)
 
     try:
+        if use_ai:
+            progress_cb("AI 正在生成讲解文案...", 0.05)
+            script = generate_script(property_info, room_names)
+        else:
+            script = {
+                "segments": manual_segments,
+                "post_title": manual_title,
+                "post_body": manual_body,
+                "hashtags": manual_hashtags.split() if manual_hashtags else [],
+            }
+
         final_path, caption_text = run_pipeline(
-            uploaded_files, room_names, property_info, workdir, progress_cb
+            uploaded_files, room_names, script, workdir, progress_cb
         )
 
         st.success("生成完成！Review一下，满意的话就去小红书发布")
