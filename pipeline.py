@@ -158,28 +158,33 @@ def make_srt(text: str, duration: float, out_path: str):
 
 
 def merge_segment(video_path: str, audio_path: str, srt_path: str, out_path: str):
-    """一次编码完成：调速对齐配音时长 + 缩放裁剪9:16 + 烧录中文字幕
-    （之前是两次编码，画质损失明显，合并成一次）"""
+    """一次编码完成：缩放裁剪9:16 + 烧录中文字幕，画面正常速度播放（不裁剪不加速）
+
+    看房视频画面完整播完比"卡着配音时长"更重要，所以谁长就以谁为准：配音说完了
+    画面还没放完就正常放到结束；画面放完了配音还没说完就定格最后一帧等配音说完"""
     orig = get_duration(video_path)
     target = get_duration(audio_path)
-    speed = max(0.5, min(orig / target, 2.0))  # 限制幅度，避免看起来太快/太慢
+    duration = max(orig, target)
 
     vf = (
-        f"setpts={1/speed}*PTS,"
         "scale=1080:1920:force_original_aspect_ratio=increase:flags=lanczos,"
         "crop=1080:1920,"
+        f"tpad=stop_mode=clone:stop_duration={max(0.0, duration - orig)},"
         f"subtitles={srt_path}:original_size=1080x1920:force_style='FontName=WenQuanYi Zen Hei,FontSize=15,"
         f"PrimaryColour=&HFFFFFF&,OutlineColour=&H000000&,BorderStyle=1,Outline=2,"
         f"Alignment=2,MarginV=80'"
     )
+    af = f"apad=pad_dur={max(0.0, duration - target)}"
     subprocess.run([
         "ffmpeg", "-y", "-i", video_path, "-i", audio_path,
         "-vf", vf,
+        "-af", af,
+        "-t", str(duration),
         "-r", "30",
         "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
         "-c:a", "aac",
         "-map", "0:v:0", "-map", "1:a:0",
-        "-shortest", out_path
+        out_path
     ], check=True, capture_output=True)
 
 

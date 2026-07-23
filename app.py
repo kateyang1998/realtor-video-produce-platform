@@ -221,27 +221,34 @@ def get_duration(path: str) -> float:
 
 def merge_segment(video_path: str, audio_path: str, srt_path: str, out_path: str,
                    font_name: str = "WenQuanYi Zen Hei", font_size: int = 15):
-    """一次编码完成：调速对齐配音时长 + 缩放裁剪9:16 + 烧录中文字幕"""
+    """一次编码完成：缩放裁剪9:16 + 烧录中文字幕，画面正常速度播放（不裁剪不加速）
+
+    这是给人看房用的视频，画面完整播完比"卡着配音时长"更重要。所以时长对齐规则是：
+    谁长就以谁为准——配音说完了画面还没放完，就让画面正常放到结束；画面放完了配音
+    还没说完（少见），就定格最后一帧等配音说完，不会把话截断"""
     orig = get_duration(video_path)
     target = get_duration(audio_path)
-    speed = max(0.5, min(orig / target, 2.0))
+    duration = max(orig, target)
 
     vf = (
-        f"setpts={1/speed}*PTS,"
         "scale=1080:1920:force_original_aspect_ratio=increase:flags=lanczos,"
         "crop=1080:1920,"
+        f"tpad=stop_mode=clone:stop_duration={max(0.0, duration - orig)},"
         f"subtitles={srt_path}:original_size=1080x1920:force_style='FontName={font_name},FontSize={font_size},"
         f"PrimaryColour=&HFFFFFF&,OutlineColour=&H000000&,BorderStyle=1,Outline=2,"
         f"Alignment=2,MarginV=80'"
     )
+    af = f"apad=pad_dur={max(0.0, duration - target)}"
     subprocess.run([
         "ffmpeg", "-y", "-i", video_path, "-i", audio_path,
         "-vf", vf,
+        "-af", af,
+        "-t", str(duration),
         "-r", "30",
         "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
         "-c:a", "aac",
         "-map", "0:v:0", "-map", "1:a:0",
-        "-shortest", out_path
+        out_path
     ], check=True, capture_output=True)
 
 
