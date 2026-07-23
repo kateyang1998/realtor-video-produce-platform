@@ -140,14 +140,14 @@ def merge_segment(video_path: str, audio_path: str, srt_path: str, out_path: str
         f"setpts={1/speed}*PTS,"
         "scale=1080:1920:force_original_aspect_ratio=increase:flags=lanczos,"
         "crop=1080:1920,"
-        f"subtitles={srt_path}:force_style='FontName=Noto Sans CJK SC,FontSize=20,"
+        f"subtitles={srt_path}:force_style='FontName=WenQuanYi Zen Hei,FontSize=20,"
         f"PrimaryColour=&HFFFFFF&,OutlineColour=&H000000&,BorderStyle=1,Outline=2,"
         f"Alignment=2,MarginV=80'"
     )
     subprocess.run([
         "ffmpeg", "-y", "-i", video_path, "-i", audio_path,
         "-vf", vf,
-        "-c:v", "libx264", "-preset", "slow", "-crf", "18",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
         "-c:a", "aac",
         "-map", "0:v:0", "-map", "1:a:0",
         "-shortest", out_path
