@@ -224,7 +224,7 @@ def merge_segment(video_path: str, audio_path: str, srt_path: str, out_path: str
         f"setpts={1/speed}*PTS,"
         "scale=1080:1920:force_original_aspect_ratio=increase:flags=lanczos,"
         "crop=1080:1920,"
-        f"subtitles={srt_path}:force_style='FontName=WenQuanYi Zen Hei,FontSize=20,"
+        f"subtitles={srt_path}:original_size=1080x1920:force_style='FontName=WenQuanYi Zen Hei,FontSize=20,"
         f"PrimaryColour=&HFFFFFF&,OutlineColour=&H000000&,BorderStyle=1,Outline=2,"
         f"Alignment=2,MarginV=80'"
     )
@@ -253,13 +253,21 @@ def make_srt(text: str, duration: float, out_path: str):
 
 
 def concat_segments(segment_paths: list, out_path: str, workdir: str):
-    list_file = os.path.join(workdir, "concat_list.txt")
-    with open(list_file, "w") as f:
-        for p in segment_paths:
-            f.write(f"file '{os.path.abspath(p)}'\n")
+    """用concat filter（解码后重新编码）拼接，而不是concat demuxer + stream copy。
+    后者要求所有片段的编码参数/时间戳严格一致才安全，我们这里的片段是分别独立编码出来的，
+    直接stream copy拼接容易在某处时间戳对不上导致播放异常/卡顿，用filter方式更稳"""
+    n = len(segment_paths)
+    inputs = []
+    for p in segment_paths:
+        inputs += ["-i", p]
+    filter_complex = "".join(f"[{i}:v:0][{i}:a:0]" for i in range(n)) + f"concat=n={n}:v=1:a=1[outv][outa]"
     subprocess.run([
-        "ffmpeg", "-y", "-f", "concat", "-safe", "0",
-        "-i", list_file, "-c", "copy", out_path
+        "ffmpeg", "-y", *inputs,
+        "-filter_complex", filter_complex,
+        "-map", "[outv]", "-map", "[outa]",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+        "-c:a", "aac",
+        out_path
     ], check=True, capture_output=True)
 
 
