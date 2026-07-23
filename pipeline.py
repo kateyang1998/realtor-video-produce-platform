@@ -175,6 +175,7 @@ def merge_segment(video_path: str, audio_path: str, srt_path: str, out_path: str
     subprocess.run([
         "ffmpeg", "-y", "-i", video_path, "-i", audio_path,
         "-vf", vf,
+        "-r", "30",
         "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
         "-c:a", "aac",
         "-map", "0:v:0", "-map", "1:a:0",
@@ -183,19 +184,17 @@ def merge_segment(video_path: str, audio_path: str, srt_path: str, out_path: str
 
 
 def concat_segments(segment_paths: list, out_path: str):
-    """用concat filter（解码后重新编码）拼接，避免stream copy在时间戳不一致时导致的
-    播放异常/卡顿问题"""
-    n = len(segment_paths)
-    inputs = []
-    for p in segment_paths:
-        inputs += ["-i", p]
-    filter_complex = "".join(f"[{i}:v:0][{i}:a:0]" for i in range(n)) + f"concat=n={n}:v=1:a=1[outv][outa]"
+    """每段视频已经在merge_segment里统一强制了帧率，时间戳兼容，可以用省资源的
+    stream copy拼接，不用整体重新编码"""
+    list_file = os.path.join(OUTPUT_DIR, "concat_list.txt")
+    with open(list_file, "w") as f:
+        for p in segment_paths:
+            f.write(f"file '{os.path.abspath(p)}'\n")
     subprocess.run([
-        "ffmpeg", "-y", *inputs,
-        "-filter_complex", filter_complex,
-        "-map", "[outv]", "-map", "[outa]",
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
-        "-c:a", "aac",
+        "ffmpeg", "-y", "-f", "concat", "-safe", "0",
+        "-i", list_file,
+        "-c", "copy",
+        "-avoid_negative_ts", "make_zero",
         out_path
     ], check=True, capture_output=True)
 

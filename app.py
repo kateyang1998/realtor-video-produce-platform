@@ -231,6 +231,7 @@ def merge_segment(video_path: str, audio_path: str, srt_path: str, out_path: str
     subprocess.run([
         "ffmpeg", "-y", "-i", video_path, "-i", audio_path,
         "-vf", vf,
+        "-r", "30",
         "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
         "-c:a", "aac",
         "-map", "0:v:0", "-map", "1:a:0",
@@ -253,20 +254,18 @@ def make_srt(text: str, duration: float, out_path: str):
 
 
 def concat_segments(segment_paths: list, out_path: str, workdir: str):
-    """用concat filter（解码后重新编码）拼接，而不是concat demuxer + stream copy。
-    后者要求所有片段的编码参数/时间戳严格一致才安全，我们这里的片段是分别独立编码出来的，
-    直接stream copy拼接容易在某处时间戳对不上导致播放异常/卡顿，用filter方式更稳"""
-    n = len(segment_paths)
-    inputs = []
-    for p in segment_paths:
-        inputs += ["-i", p]
-    filter_complex = "".join(f"[{i}:v:0][{i}:a:0]" for i in range(n)) + f"concat=n={n}:v=1:a=1[outv][outa]"
+    """每段视频在merge_segment里已经统一强制了帧率（-r 30），时间戳兼容，
+    所以这里可以用省资源的stream copy拼接，不用再整体重新编码一遍（对免费实例的
+    CPU/内存友好很多）"""
+    list_file = os.path.join(workdir, "concat_list.txt")
+    with open(list_file, "w") as f:
+        for p in segment_paths:
+            f.write(f"file '{os.path.abspath(p)}'\n")
     subprocess.run([
-        "ffmpeg", "-y", *inputs,
-        "-filter_complex", filter_complex,
-        "-map", "[outv]", "-map", "[outa]",
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
-        "-c:a", "aac",
+        "ffmpeg", "-y", "-f", "concat", "-safe", "0",
+        "-i", list_file,
+        "-c", "copy",
+        "-avoid_negative_ts", "make_zero",
         out_path
     ], check=True, capture_output=True)
 
