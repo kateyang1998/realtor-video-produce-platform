@@ -26,7 +26,12 @@ import streamlit as st
 import anthropic
 import edge_tts
 
-VOICE = "zh-CN-XiaoxiaoNeural"
+VOICE_OPTIONS = {
+    "晓晓 - 温暖女声（默认）": "zh-CN-XiaoxiaoNeural",
+    "晓伊 - 活泼女声": "zh-CN-XiaoyiNeural",
+    "云希 - 自然男声": "zh-CN-YunxiNeural",
+    "晓墨 - 成熟女声": "zh-CN-XiaomoNeural",
+}
 
 st.set_page_config(page_title="房源视频生成器", page_icon="🎬", layout="centered")
 
@@ -43,19 +48,25 @@ def get_client():
 
 def generate_script(property_info: dict, room_names: list) -> dict:
     client = get_client()
-    prompt = f"""你是一个小红书房产博主的文案助理。请根据以下房源信息，
-为一条房源walkthrough视频生成分房间的口播讲解文案，以及一段小红书笔记文案。
+    prompt = f"""你是一个小红书房产博主，风格是那种跟朋友唠嗑一样自然、有点小兴奋的语气，
+不是地产中介的官方话术。请根据以下房源信息，为一条房源walkthrough视频写分房间的口播讲解词，
+以及一段小红书笔记文案。
 
 房源信息：
 {json.dumps(property_info, ensure_ascii=False, indent=2)}
 
 视频镜头顺序（按房间）：{room_names}
 
-要求：
-1. 给每个房间写1-2句口播讲解词，口语化、有画面感、像真人在带看，不要说明书式堆参数
-2. 语气符合小红书"种草"风格，不要广告腔
-3. 每句话长度适合正常语速朗读（大约5-8秒能读完）
-4. 最后单独写一段小红书发布文案：标题(吸引点击，可带emoji) + 正文(3-5句，呼应视频内容+行动号召) + 5个相关话题标签
+讲解词的要求（很重要，照着做）：
+1. 就当你自己拿着手机边走边跟朋友说话，用短句，可以有语气词（"你看"、"我跟你说"、"绝了"这种），
+   不要用"该房间"、"本户型"、"总体而言"这类书面语/中介腔
+2. 每个房间1句话就够，最多2句，别堆砌形容词，挑1个最有记忆点的细节说
+3. 反例（不要这样写）："本厨房配备大理石岛台，动线合理，采光充足"
+   正例（要这样写）："厨房这个岛台是真的大，一家人围着做饭聊天完全没问题"
+4. 每句话控制在能5-8秒读完的长度（大概15-25个字）
+
+最后单独写小红书发布文案：标题(吸引点击，可带emoji，别太夸张) + 正文(3-5句，呼应视频内容，
+口语化，结尾可以带一句行动号召比如"想看详细信息评论区戳我") + 5个相关话题标签
 
 严格按以下JSON格式输出，不要有任何其他文字或markdown代码块标记：
 {{
@@ -75,13 +86,13 @@ def generate_script(property_info: dict, room_names: list) -> dict:
     return json.loads(text)
 
 
-async def _tts_segment(text: str, out_path: str, voice: str = VOICE):
+async def _tts_segment(text: str, out_path: str, voice: str):
     communicate = edge_tts.Communicate(text, voice)
     await communicate.save(out_path)
 
 
-def tts_segment_sync(text: str, out_path: str):
-    asyncio.run(_tts_segment(text, out_path))
+def tts_segment_sync(text: str, out_path: str, voice: str):
+    asyncio.run(_tts_segment(text, out_path, voice))
 
 
 def get_duration(path: str) -> float:
@@ -93,14 +104,28 @@ def get_duration(path: str) -> float:
     return float(out.stdout.strip())
 
 
-def adjust_video_to_duration(video_path: str, target_duration: float, out_path: str):
+def merge_segment(video_path: str, audio_path: str, srt_path: str, out_path: str):
+    """一次编码完成：调速对齐配音时长 + 缩放裁剪9:16 + 烧录中文字幕
+    （之前是调速一次编码、烧字幕再编码一次，两次压缩会明显损失画质，合并成一次）"""
     orig = get_duration(video_path)
-    speed = orig / target_duration
-    speed = max(0.5, min(speed, 2.0))
+    target = get_duration(audio_path)
+    speed = max(0.5, min(orig / target, 2.0))  # 限制调速幅度，避免看起来过快/过慢
+
+    vf = (
+        f"setpts={1/speed}*PTS,"
+        "scale=1080:1920:force_original_aspect_ratio=increase:flags=lanczos,"
+        "crop=1080:1920,"
+        f"subtitles={srt_path}:force_style='FontName=Noto Sans CJK SC,FontSize=20,"
+        f"PrimaryColour=&HFFFFFF&,OutlineColour=&H000000&,BorderStyle=1,Outline=2,"
+        f"Alignment=2,MarginV=80'"
+    )
     subprocess.run([
-        "ffmpeg", "-y", "-i", video_path,
-        "-filter:v", f"setpts={1/speed}*PTS",
-        "-an", out_path
+        "ffmpeg", "-y", "-i", video_path, "-i", audio_path,
+        "-vf", vf,
+        "-c:v", "libx264", "-preset", "slow", "-crf", "18",
+        "-c:a", "aac",
+        "-map", "0:v:0", "-map", "1:a:0",
+        "-shortest", out_path
     ], check=True, capture_output=True)
 
 
@@ -118,22 +143,6 @@ def make_srt(text: str, duration: float, out_path: str):
         f.write(text + "\n")
 
 
-def merge_segment(video_path: str, audio_path: str, srt_path: str, out_path: str):
-    vf = (
-        "scale=1080:1920:force_original_aspect_ratio=increase,"
-        "crop=1080:1920,"
-        f"subtitles={srt_path}:force_style='FontSize=20,PrimaryColour=&HFFFFFF&,"
-        f"OutlineColour=&H000000&,BorderStyle=1,Outline=2,Alignment=2,MarginV=80'"
-    )
-    subprocess.run([
-        "ffmpeg", "-y", "-i", video_path, "-i", audio_path,
-        "-vf", vf,
-        "-c:v", "libx264", "-c:a", "aac",
-        "-map", "0:v:0", "-map", "1:a:0",
-        "-shortest", out_path
-    ], check=True, capture_output=True)
-
-
 def concat_segments(segment_paths: list, out_path: str, workdir: str):
     list_file = os.path.join(workdir, "concat_list.txt")
     with open(list_file, "w") as f:
@@ -145,7 +154,7 @@ def concat_segments(segment_paths: list, out_path: str, workdir: str):
     ], check=True, capture_output=True)
 
 
-def run_pipeline(uploaded_files, room_names, script, workdir, progress_cb):
+def run_pipeline(uploaded_files, room_names, script, voice, workdir, progress_cb):
     """script 是一个已经准备好的 dict：{"segments": {房间: 文案}, "post_title": ..., "post_body": ..., "hashtags": [...]}
     可以来自 generate_script()（AI生成），也可以是手动填写拼出来的——这个函数不关心来源"""
     video_files = []
@@ -165,15 +174,13 @@ def run_pipeline(uploaded_files, room_names, script, workdir, progress_cb):
         base = os.path.join(workdir, room)
         audio_path = base + ".mp3"
         srt_path = base + ".srt"
-        adj_video_path = base + "_adj.mp4"
         seg_out_path = base + "_final.mp4"
 
         progress_cb(f"正在处理「{room}」...", 0.1 + 0.7 * (i / n))
-        tts_segment_sync(text, audio_path)
+        tts_segment_sync(text, audio_path, voice)
         duration = get_duration(audio_path)
         make_srt(text, duration, srt_path)
-        adjust_video_to_duration(video_path, duration, adj_video_path)
-        merge_segment(adj_video_path, audio_path, srt_path, seg_out_path)
+        merge_segment(video_path, audio_path, srt_path, seg_out_path)
         segment_outputs.append(seg_out_path)
 
     progress_cb("正在拼接成片...", 0.85)
@@ -221,7 +228,7 @@ property_info = {}
 manual_segments = {}
 
 if use_ai:
-    st.subheader("② 房源信息")
+    st.subheader("③ 房源信息")
     property_info = {
         "地址": st.text_input("地址/小区名"),
         "户型": st.text_input("户型（例如：3室2卫）"),
@@ -232,7 +239,7 @@ if use_ai:
         "目标客群": st.text_input("目标客群（可选）"),
     }
 else:
-    st.subheader("② 每个房间自己写一句讲解词")
+    st.subheader("③ 每个房间自己写一句讲解词")
     if room_names:
         for room in room_names:
             manual_segments[room] = st.text_area(f"「{room}」的讲解词", key=f"seg_{room}")
@@ -241,7 +248,12 @@ else:
     manual_body = st.text_area("正文")
     manual_hashtags = st.text_input("话题标签（空格分隔，例如：#卡尔加里买房 #首次购房）")
 
-st.subheader("③ 生成")
+st.subheader("③ 配音音色")
+voice_label = st.selectbox("选一个试试，音质有差异，多试几个", list(VOICE_OPTIONS.keys()))
+selected_voice = VOICE_OPTIONS[voice_label]
+st.caption("这几个都是免费的通用AI音色，会有一定机器感，如果想要完全自然、像真人的声音，需要用声音克隆（额外付费），这个可以后面再升级")
+
+st.subheader("④ 生成")
 if st.button("🚀 生成视频和文案", type="primary", disabled=not uploaded_files):
     workdir = tempfile.mkdtemp()
     progress_bar = st.progress(0.0)
@@ -264,7 +276,7 @@ if st.button("🚀 生成视频和文案", type="primary", disabled=not uploaded
             }
 
         final_path, caption_text = run_pipeline(
-            uploaded_files, room_names, script, workdir, progress_cb
+            uploaded_files, room_names, script, selected_voice, workdir, progress_cb
         )
 
         st.success("生成完成！Review一下，满意的话就去小红书发布")

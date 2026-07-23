@@ -54,19 +54,25 @@ def room_name_from_filename(path: str) -> str:
 
 
 def generate_script(property_info: dict, room_names: list) -> dict:
-    prompt = f"""你是一个小红书房产博主的文案助理。请根据以下房源信息，
-为一条房源walkthrough视频生成分房间的口播讲解文案，以及一段小红书笔记文案。
+    prompt = f"""你是一个小红书房产博主，风格是那种跟朋友唠嗑一样自然、有点小兴奋的语气，
+不是地产中介的官方话术。请根据以下房源信息，为一条房源walkthrough视频写分房间的口播讲解词，
+以及一段小红书笔记文案。
 
 房源信息：
 {json.dumps(property_info, ensure_ascii=False, indent=2)}
 
 视频镜头顺序（按房间）：{room_names}
 
-要求：
-1. 给每个房间写1-2句口播讲解词，口语化、有画面感、像真人在带看，不要说明书式堆参数
-2. 语气符合小红书"种草"风格，不要广告腔
-3. 每句话长度适合正常语速朗读（大约5-8秒能读完）
-4. 最后单独写一段小红书发布文案：标题(吸引点击，可带emoji) + 正文(3-5句，呼应视频内容+行动号召) + 5个相关话题标签
+讲解词的要求（很重要，照着做）：
+1. 就当你自己拿着手机边走边跟朋友说话，用短句，可以有语气词（"你看"、"我跟你说"、"绝了"这种），
+   不要用"该房间"、"本户型"、"总体而言"这类书面语/中介腔
+2. 每个房间1句话就够，最多2句，别堆砌形容词，挑1个最有记忆点的细节说
+3. 反例（不要这样写）："本厨房配备大理石岛台，动线合理，采光充足"
+   正例（要这样写）："厨房这个岛台是真的大，一家人围着做饭聊天完全没问题"
+4. 每句话控制在能5-8秒读完的长度（大概15-25个字）
+
+最后单独写小红书发布文案：标题(吸引点击，可带emoji，别太夸张) + 正文(3-5句，呼应视频内容，
+口语化，结尾可以带一句行动号召比如"想看详细信息评论区戳我") + 5个相关话题标签
 
 严格按以下JSON格式输出，不要有任何其他文字或markdown代码块标记：
 {{
@@ -108,18 +114,6 @@ def get_duration(path: str) -> float:
     return float(out.stdout.strip())
 
 
-def adjust_video_to_duration(video_path: str, target_duration: float, out_path: str):
-    """把无声视频片段的时长调整到跟配音时长一致（轻微加速/减速）"""
-    orig = get_duration(video_path)
-    speed = orig / target_duration
-    speed = max(0.5, min(speed, 2.0))  # 限制幅度，避免看起来太快/太慢
-    subprocess.run([
-        "ffmpeg", "-y", "-i", video_path,
-        "-filter:v", f"setpts={1/speed}*PTS",
-        "-an", out_path
-    ], check=True, capture_output=True)
-
-
 def ms_to_srt_time(ms: int) -> str:
     h, ms = divmod(ms, 3600000)
     m, ms = divmod(ms, 60000)
@@ -136,17 +130,25 @@ def make_srt(text: str, duration: float, out_path: str):
 
 
 def merge_segment(video_path: str, audio_path: str, srt_path: str, out_path: str):
-    """合成单片段：视频+配音+烧录字幕，统一裁成9:16竖屏"""
+    """一次编码完成：调速对齐配音时长 + 缩放裁剪9:16 + 烧录中文字幕
+    （之前是两次编码，画质损失明显，合并成一次）"""
+    orig = get_duration(video_path)
+    target = get_duration(audio_path)
+    speed = max(0.5, min(orig / target, 2.0))  # 限制幅度，避免看起来太快/太慢
+
     vf = (
-        "scale=1080:1920:force_original_aspect_ratio=increase,"
+        f"setpts={1/speed}*PTS,"
+        "scale=1080:1920:force_original_aspect_ratio=increase:flags=lanczos,"
         "crop=1080:1920,"
-        f"subtitles={srt_path}:force_style='FontSize=20,PrimaryColour=&HFFFFFF&,"
-        f"OutlineColour=&H000000&,BorderStyle=1,Outline=2,Alignment=2,MarginV=80'"
+        f"subtitles={srt_path}:force_style='FontName=Noto Sans CJK SC,FontSize=20,"
+        f"PrimaryColour=&HFFFFFF&,OutlineColour=&H000000&,BorderStyle=1,Outline=2,"
+        f"Alignment=2,MarginV=80'"
     )
     subprocess.run([
         "ffmpeg", "-y", "-i", video_path, "-i", audio_path,
         "-vf", vf,
-        "-c:v", "libx264", "-c:a", "aac",
+        "-c:v", "libx264", "-preset", "slow", "-crf", "18",
+        "-c:a", "aac",
         "-map", "0:v:0", "-map", "1:a:0",
         "-shortest", out_path
     ], check=True, capture_output=True)
@@ -189,7 +191,6 @@ def main():
         base = os.path.join(OUTPUT_DIR, room)
         audio_path = base + ".mp3"
         srt_path = base + ".srt"
-        adj_video_path = base + "_adj.mp4"
         seg_out_path = base + "_final.mp4"
 
         print(f"  - {room}: 生成配音...")
@@ -197,8 +198,7 @@ def main():
         duration = get_duration(audio_path)
 
         make_srt(text, duration, srt_path)
-        adjust_video_to_duration(video_path, duration, adj_video_path)
-        merge_segment(adj_video_path, audio_path, srt_path, seg_out_path)
+        merge_segment(video_path, audio_path, srt_path, seg_out_path)
 
         segment_outputs.append(seg_out_path)
 
