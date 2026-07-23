@@ -1,21 +1,20 @@
 """
-小红书房源视频自动化工具 - 网页版 (Streamlit)
+Reeltour - 房源视频生成器（网页版）
 =================================================
-给她用的界面：上传素材 → 填房源信息 → 点生成 → 看成片+下载文案
+给她用的界面：上传素材 → （如果是一镜到底，AI自动分段）→ 填讲解文案 → 点生成 →
+看成片+下载文案
 
 本地运行（开发/测试用）：
-  pip install streamlit anthropic edge-tts
+  pip install -r requirements.txt
   export ANTHROPIC_API_KEY=你的key
   streamlit run app.py
-
-真正给她用，需要部署到服务器（见 README 里的部署说明），
-部署后她只需要打开一个网址，不需要装任何东西。
 """
 
 import os
 import re
 import json
 import glob
+import base64
 import shutil
 import asyncio
 import tempfile
@@ -33,10 +32,12 @@ VOICE_OPTIONS = {
     "晓墨 - 成熟女声": "zh-CN-XiaomoNeural",
 }
 
-st.set_page_config(page_title="房源视频生成器", page_icon="🎬", layout="centered")
+FRAME_INTERVAL = 4.0  # 自动分段时，每隔几秒抽一帧画面给AI判断房间类型
+
+st.set_page_config(page_title="Reeltour", page_icon="🎬", layout="centered")
 
 
-# ---------- 核心逻辑（跟 pipeline.py 一致，改成函数式方便网页调用） ----------
+# ---------- 核心逻辑 ----------
 
 def get_client():
     api_key = os.environ.get("ANTHROPIC_API_KEY")
@@ -86,6 +87,76 @@ def generate_script(property_info: dict, room_names: list) -> dict:
     return json.loads(text)
 
 
+# ---------- AI自动分段（一镜到底模式用） ----------
+
+def extract_frames(video_path: str, workdir: str, interval: float = FRAME_INTERVAL):
+    frames_dir = os.path.join(workdir, "frames")
+    os.makedirs(frames_dir, exist_ok=True)
+    subprocess.run([
+        "ffmpeg", "-y", "-i", video_path,
+        "-vf", f"fps=1/{interval}", "-q:v", "3",
+        os.path.join(frames_dir, "f_%04d.jpg")
+    ], check=True, capture_output=True)
+    files = sorted(glob.glob(os.path.join(frames_dir, "f_*.jpg")))
+    return [(i * interval, path) for i, path in enumerate(files)]
+
+
+def detect_room_segments(video_path: str, workdir: str) -> list:
+    """用AI看抽出来的画面帧，自动判断每一段是哪个房间，返回
+    [{"room": "厨房", "start": 0.0, "end": 12.0}, ...]"""
+    client = get_client()
+    frames = extract_frames(video_path, workdir)
+    if not frames:
+        return []
+    # 免费实例资源有限，帧数太多容易超时/爆内存，限制一下最多分析的帧数
+    frames = frames[:60]
+
+    content = [{
+        "type": "text",
+        "text": (
+            "以下是一段房源walkthrough视频按固定间隔抽取的画面截图，按时间顺序排列，"
+            "第一张对应第0秒。请判断每一张截图所在的空间类型（例如：玄关、客厅、厨房、"
+            "卧室、浴室、走廊、储藏室、后院、其他），相邻画面如果明显是同一个空间应该标"
+            "同一个标签，不要因为镜头轻微晃动/角度变化就换标签，尽量减少不必要的切换。\n\n"
+            "严格按以下JSON数组格式输出，每个元素对应一张图，不要输出其他文字：\n"
+            '[{"index": 0, "room": "客厅"}, {"index": 1, "room": "客厅"}]'
+        )
+    }]
+    for i, (t, path) in enumerate(frames):
+        img_b64 = base64.b64encode(open(path, "rb").read()).decode()
+        content.append({
+            "type": "image",
+            "source": {"type": "base64", "media_type": "image/jpeg", "data": img_b64}
+        })
+
+    resp = client.messages.create(
+        model="claude-sonnet-5", max_tokens=3000,
+        messages=[{"role": "user", "content": content}],
+    )
+    text = resp.content[0].text.strip()
+    text = re.sub(r"^```json\s*|\s*```$", "", text)
+    labels = json.loads(text)
+
+    segments = []
+    for item in labels:
+        idx, room = item["index"], item["room"]
+        t = frames[idx][0]
+        if segments and segments[-1]["room"] == room:
+            segments[-1]["end"] = round(t + FRAME_INTERVAL, 1)
+        else:
+            segments.append({"room": room, "start": round(t, 1), "end": round(t + FRAME_INTERVAL, 1)})
+    return segments
+
+
+def cut_clip(video_path: str, start: float, end: float, out_path: str):
+    subprocess.run([
+        "ffmpeg", "-y", "-i", video_path, "-ss", str(start), "-to", str(end),
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-an", out_path
+    ], check=True, capture_output=True)
+
+
+# ---------- TTS + ffmpeg 合成 ----------
+
 async def _tts_segment(text: str, out_path: str, voice: str):
     communicate = edge_tts.Communicate(text, voice)
     await communicate.save(out_path)
@@ -105,11 +176,10 @@ def get_duration(path: str) -> float:
 
 
 def merge_segment(video_path: str, audio_path: str, srt_path: str, out_path: str):
-    """一次编码完成：调速对齐配音时长 + 缩放裁剪9:16 + 烧录中文字幕
-    （之前是调速一次编码、烧字幕再编码一次，两次压缩会明显损失画质，合并成一次）"""
+    """一次编码完成：调速对齐配音时长 + 缩放裁剪9:16 + 烧录中文字幕"""
     orig = get_duration(video_path)
     target = get_duration(audio_path)
-    speed = max(0.5, min(orig / target, 2.0))  # 限制调速幅度，避免看起来过快/过慢
+    speed = max(0.5, min(orig / target, 2.0))
 
     vf = (
         f"setpts={1/speed}*PTS,"
@@ -154,24 +224,17 @@ def concat_segments(segment_paths: list, out_path: str, workdir: str):
     ], check=True, capture_output=True)
 
 
-def run_pipeline(uploaded_files, room_names, script, voice, workdir, progress_cb):
-    """script 是一个已经准备好的 dict：{"segments": {房间: 文案}, "post_title": ..., "post_body": ..., "hashtags": [...]}
-    可以来自 generate_script()（AI生成），也可以是手动填写拼出来的——这个函数不关心来源"""
-    video_files = []
-    for f, room in zip(uploaded_files, room_names):
-        path = os.path.join(workdir, f"{room}{Path(f.name).suffix}")
-        with open(path, "wb") as out:
-            out.write(f.getbuffer())
-        video_files.append(path)
-
+def run_pipeline(clip_paths, room_names, script, voice, workdir, progress_cb):
+    """clip_paths 和 room_names 一一对应，clip_paths 是已经切好的单房间无声视频文件路径
+    （不管是手动按房间上传的，还是自动分段切出来的，走到这里都是一样的）"""
     segment_outputs = []
-    n = len(video_files)
-    for i, (video_path, room) in enumerate(zip(video_files, room_names)):
+    n = len(clip_paths)
+    for i, (video_path, room) in enumerate(zip(clip_paths, room_names)):
         text = script["segments"].get(room, "")
         if not text:
             continue
 
-        base = os.path.join(workdir, room)
+        base = os.path.join(workdir, f"seg{i}_{re.sub(r'[^0-9a-zA-Z_一-龥]', '_', room)}")
         audio_path = base + ".mp3"
         srt_path = base + ".srt"
         seg_out_path = base + "_final.mp4"
@@ -188,9 +251,9 @@ def run_pipeline(uploaded_files, room_names, script, voice, workdir, progress_cb
     concat_segments(segment_outputs, final_path, workdir)
 
     caption_text = (
-        script["post_title"] + "\n\n" +
-        script["post_body"] + "\n\n" +
-        " ".join(script["hashtags"])
+        script.get("post_title", "") + "\n\n" +
+        script.get("post_body", "") + "\n\n" +
+        " ".join(script.get("hashtags", []))
     )
 
     progress_cb("完成！", 1.0)
@@ -199,28 +262,72 @@ def run_pipeline(uploaded_files, room_names, script, voice, workdir, progress_cb
 
 # ---------- 网页界面 ----------
 
-st.title("🎬 房源视频生成器")
-st.caption("上传素材，填一下房源信息，AI帮你生成带配音+字幕的成片和小红书文案")
+st.title("🎬 Reeltour")
+st.caption("上传素材，AI帮你生成带配音+字幕的成片和小红书文案")
 
 st.subheader("① 上传视频素材")
-st.write("按拍摄顺序上传（比如先厨房再客厅），下面会让你给每段标注房间名")
-uploaded_files = st.file_uploader(
-    "选择视频文件（可多选）", type=["mov", "mp4"], accept_multiple_files=True
+upload_mode = st.radio(
+    "拍摄方式",
+    ["已经按房间分开拍摄（每段一个文件）", "一镜到底拍完整套房子，AI自动分段（测试中）"],
 )
 
 room_names = []
-if uploaded_files:
-    st.write("给每段素材标一下房间/区域名称：")
-    cols = st.columns(len(uploaded_files)) if len(uploaded_files) <= 4 else None
-    for i, f in enumerate(uploaded_files):
-        default_guess = re.sub(r"^\d+[-_]", "", Path(f.name).stem)
-        room = st.text_input(f"素材 {i+1}（{f.name}）", value=default_guess, key=f"room_{i}")
-        room_names.append(room)
+manual_clip_paths = {}  # 手动模式：{房间名: 上传的文件对象}
+
+if upload_mode.startswith("已经"):
+    uploaded_files = st.file_uploader(
+        "选择视频文件（可多选）", type=["mov", "mp4"], accept_multiple_files=True
+    )
+    if uploaded_files:
+        st.write("给每段素材标一下房间/区域名称：")
+        for i, f in enumerate(uploaded_files):
+            default_guess = re.sub(r"^\d+[-_]", "", Path(f.name).stem)
+            room = st.text_input(f"素材 {i+1}（{f.name}）", value=default_guess, key=f"room_{i}")
+            room_names.append(room)
+            manual_clip_paths[room] = f
+else:
+    uploaded_files = None
+    single_file = st.file_uploader("上传完整walkthrough视频（无声）", type=["mov", "mp4"])
+    if single_file:
+        if st.session_state.get("auto_file_name") != single_file.name:
+            # 新文件，重置session state
+            st.session_state.auto_workdir = tempfile.mkdtemp()
+            video_path = os.path.join(st.session_state.auto_workdir, "full" + Path(single_file.name).suffix)
+            with open(video_path, "wb") as f:
+                f.write(single_file.getbuffer())
+            st.session_state.auto_video_path = video_path
+            st.session_state.auto_file_name = single_file.name
+            st.session_state.auto_segments = None
+
+        if st.button("🔍 AI 识别房间分段"):
+            with st.spinner("正在抽取画面帧、识别房间中，可能要一会儿..."):
+                try:
+                    segments = detect_room_segments(
+                        st.session_state.auto_video_path, st.session_state.auto_workdir
+                    )
+                    st.session_state.auto_segments = segments
+                except Exception as e:
+                    st.error(f"识别失败：{e}")
+
+        if st.session_state.get("auto_segments"):
+            st.write("识别结果，检查一下，不对的话可以直接改：")
+            edited = st.data_editor(
+                st.session_state.auto_segments,
+                num_rows="dynamic",
+                column_config={
+                    "room": st.column_config.TextColumn("房间"),
+                    "start": st.column_config.NumberColumn("开始(秒)"),
+                    "end": st.column_config.NumberColumn("结束(秒)"),
+                },
+                key="segments_editor",
+            )
+            st.session_state.auto_segments = edited
+            room_names = [seg["room"] for seg in edited if seg.get("room")]
 
 mode = st.radio(
     "② 讲解文案怎么来",
     ["手动输入（免费，测试用）", "AI自动生成（需要 API key，正式使用推荐）"],
-    help="测试阶段建议先用手动输入，不需要配置任何API key，先验证配音+剪辑效果",
+    help="测试阶段建议先用手动输入，不需要配置任何API key",
 )
 use_ai = mode.startswith("AI")
 
@@ -248,13 +355,14 @@ else:
     manual_body = st.text_area("正文")
     manual_hashtags = st.text_input("话题标签（空格分隔，例如：#卡尔加里买房 #首次购房）")
 
-st.subheader("③ 配音音色")
+st.subheader("④ 配音音色")
 voice_label = st.selectbox("选一个试试，音质有差异，多试几个", list(VOICE_OPTIONS.keys()))
 selected_voice = VOICE_OPTIONS[voice_label]
-st.caption("这几个都是免费的通用AI音色，会有一定机器感，如果想要完全自然、像真人的声音，需要用声音克隆（额外付费），这个可以后面再升级")
+st.caption("这几个都是免费的通用AI音色，会有一定机器感，想要完全自然的声音需要声音克隆（额外付费），可以后面再升级")
 
-st.subheader("④ 生成")
-if st.button("🚀 生成视频和文案", type="primary", disabled=not uploaded_files):
+st.subheader("⑤ 生成")
+can_generate = bool(room_names)
+if st.button("🚀 生成视频和文案", type="primary", disabled=not can_generate):
     workdir = tempfile.mkdtemp()
     progress_bar = st.progress(0.0)
     status = st.empty()
@@ -264,8 +372,24 @@ if st.button("🚀 生成视频和文案", type="primary", disabled=not uploaded
         progress_bar.progress(pct)
 
     try:
+        # 准备好每个房间对应的无声视频片段路径
+        clip_paths = []
+        if upload_mode.startswith("已经"):
+            for room in room_names:
+                f = manual_clip_paths[room]
+                path = os.path.join(workdir, f"{room}{Path(f.name).suffix}")
+                with open(path, "wb") as out:
+                    out.write(f.getbuffer())
+                clip_paths.append(path)
+        else:
+            progress_cb("正在按识别结果切分视频...", 0.05)
+            for i, seg in enumerate(st.session_state.auto_segments):
+                clip_path = os.path.join(workdir, f"clip{i}.mp4")
+                cut_clip(st.session_state.auto_video_path, seg["start"], seg["end"], clip_path)
+                clip_paths.append(clip_path)
+
         if use_ai:
-            progress_cb("AI 正在生成讲解文案...", 0.05)
+            progress_cb("AI 正在生成讲解文案...", 0.08)
             script = generate_script(property_info, room_names)
         else:
             script = {
@@ -276,7 +400,7 @@ if st.button("🚀 生成视频和文案", type="primary", disabled=not uploaded
             }
 
         final_path, caption_text = run_pipeline(
-            uploaded_files, room_names, script, selected_voice, workdir, progress_cb
+            clip_paths, room_names, script, selected_voice, workdir, progress_cb
         )
 
         st.success("生成完成！Review一下，满意的话就去小红书发布")
