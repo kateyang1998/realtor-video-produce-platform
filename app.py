@@ -123,12 +123,14 @@ def detect_room_segments(video_path: str, workdir: str) -> list:
     content = [{
         "type": "text",
         "text": (
-            "以下是一段房源walkthrough视频按固定间隔抽取的画面截图，按时间顺序排列，"
-            "第一张对应第0秒。请判断每一张截图所在的空间类型（例如：玄关、客厅、厨房、"
-            "卧室、浴室、走廊、储藏室、后院、其他），相邻画面如果明显是同一个空间应该标"
-            "同一个标签，不要因为镜头轻微晃动/角度变化就换标签，尽量减少不必要的切换。\n\n"
-            "严格按以下JSON数组格式输出，每个元素对应一张图，不要输出其他文字：\n"
-            '[{"index": 0, "room": "客厅"}, {"index": 1, "room": "客厅"}]'
+            f"以下是一段房源walkthrough视频按固定间隔抽取的{len(frames)}张画面截图，"
+            "按时间顺序排列，第一张对应第0秒。请判断每一张截图所在的空间类型（例如："
+            "玄关、客厅、厨房、卧室、浴室、走廊、储藏室、后院、其他），相邻画面如果明显"
+            "是同一个空间应该标同一个标签，不要因为镜头轻微晃动/角度变化就换标签，尽量"
+            f"减少不必要的切换。\n\n"
+            f"必须严格按顺序返回一个长度为{len(frames)}的JSON数组，"
+            "第i个元素对应第i张图（从0开始数），不要输出其他文字，格式：\n"
+            '[{"room": "客厅"}, {"room": "客厅"}, {"room": "厨房"}]'
         )
     }]
     for i, (t, path) in enumerate(frames):
@@ -146,10 +148,14 @@ def detect_room_segments(video_path: str, workdir: str) -> list:
     text = re.sub(r"^```json\s*|\s*```$", "", text)
     labels = json.loads(text)
 
+    # 不用AI返回的"index"字段去反查frames（AI偶尔会数错张数导致越界），
+    # 而是直接按labels列表本身的顺序对应frames列表的顺序——两者理论上是一一对应的
     segments = []
-    for item in labels:
-        idx, room = item["index"], item["room"]
-        t = frames[idx][0]
+    for i, item in enumerate(labels):
+        if i >= len(frames):
+            break
+        room = item.get("room", "未知空间")
+        t = frames[i][0]
         if segments and segments[-1]["room"] == room:
             segments[-1]["end"] = round(t + FRAME_INTERVAL, 1)
         else:
