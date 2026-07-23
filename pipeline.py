@@ -45,6 +45,14 @@ VOICE = "zh-CN-XiaoxiaoNeural"
 client = anthropic.Anthropic()  # 自动读取 ANTHROPIC_API_KEY 环境变量
 
 
+def extract_text(resp) -> str:
+    """从API响应里取出真正的文字内容，不能直接假设content[0]就是文字block"""
+    for block in resp.content:
+        if getattr(block, "type", None) == "text":
+            return block.text
+    raise ValueError("API响应里没有找到文字内容")
+
+
 # ---------- 第一步：AI 生成分房间讲解文案 + 小红书发布文案 ----------
 
 def room_name_from_filename(path: str) -> str:
@@ -87,7 +95,7 @@ def generate_script(property_info: dict, room_names: list) -> dict:
         max_tokens=1500,
         messages=[{"role": "user", "content": prompt}],
     )
-    text = resp.content[0].text.strip()
+    text = extract_text(resp).strip()
     text = re.sub(r"^```json\s*|\s*```$", "", text)
     return json.loads(text)
 

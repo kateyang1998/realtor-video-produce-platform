@@ -47,6 +47,15 @@ def get_client():
     return anthropic.Anthropic(api_key=api_key)
 
 
+def extract_text(resp) -> str:
+    """从API响应里取出真正的文字内容。较新的模型可能会先返回一个思考过程的block，
+    不一定第一个block就是文字答案，所以要遍历找类型是text的那个，不能直接取 content[0]"""
+    for block in resp.content:
+        if getattr(block, "type", None) == "text":
+            return block.text
+    raise ValueError("API响应里没有找到文字内容")
+
+
 def generate_script(property_info: dict, room_names: list) -> dict:
     client = get_client()
     prompt = f"""你是一个小红书房产博主，风格是那种跟朋友唠嗑一样自然、有点小兴奋的语气，
@@ -82,7 +91,7 @@ def generate_script(property_info: dict, room_names: list) -> dict:
         max_tokens=1500,
         messages=[{"role": "user", "content": prompt}],
     )
-    text = resp.content[0].text.strip()
+    text = extract_text(resp).strip()
     text = re.sub(r"^```json\s*|\s*```$", "", text)
     return json.loads(text)
 
@@ -133,7 +142,7 @@ def detect_room_segments(video_path: str, workdir: str) -> list:
         model="claude-sonnet-5", max_tokens=3000,
         messages=[{"role": "user", "content": content}],
     )
-    text = resp.content[0].text.strip()
+    text = extract_text(resp).strip()
     text = re.sub(r"^```json\s*|\s*```$", "", text)
     labels = json.loads(text)
 
